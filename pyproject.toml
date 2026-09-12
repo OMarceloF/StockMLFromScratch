@@ -1,0 +1,14 @@
+[project]
+name = "stock-ml-from-scratch"
+version = "0.1.0"
+description = "Linear and logistic regression built from scratch with NumPy, validated against scikit-learn on 35 years of US equity data."
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+# Makes `import src.models...` work from inside tests/ without installing the
+# package: pytest prepends these paths to sys.path before collection.
+pythonpath = ["."]
+testpaths = ["tests"]
+# -q      : quiet, one line per test file
+# --strict-markers : typo in a @pytest.mark name becomes an error, not a silent no-op
+addopts = "-q --strict-markers"

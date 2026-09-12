@@ -1,0 +1,21 @@
+# Direct dependencies only, pinned for reproducibility.
+# Install with:  pip install -r requirements.txt
+# Python 3.13
+
+# --- core numerics & data ---
+numpy==2.5.3
+pandas==3.0.5
+pyarrow==25.0.1          # Parquet engine for the processed-data cache
+
+# --- reference implementations (we compare our from-scratch models against these) ---
+scikit-learn==1.9.1
+
+# --- plotting ---
+matplotlib==3.11.2
+
+# --- testing ---
+pytest==9.1.1
+
+# --- notebooks ---
+jupyterlab==4.6.3
+ipykernel==7.3.0

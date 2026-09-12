@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# Virtual environment
+# ---------------------------------------------------------------------------
+# Never commit the venv: it is ~500 MB, platform-specific, and fully
+# reconstructible from requirements.txt.
+venv/
+.venv/
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+# The raw dataset is 243 MB. GitHub rejects files above 100 MB, and a blob that
+# slips into history stays there forever -- `git rm` removes the file but not
+# the object. Only the small curated sample under data/sample/ is versioned, so
+# a fresh clone can run the tests and notebooks without any download.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Safety net: bulk data must never be committed from anywhere in the tree,
+# including the repository root. The single exception is the sample file.
+*.csv
+*.parquet
+!data/sample/*.csv
+
+# ---------------------------------------------------------------------------
+# Notebooks
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+# Note: notebook *outputs* are intentionally kept. This is a portfolio repo --
+# a reader should see the charts and numbers on GitHub without running anything.
+
+# ---------------------------------------------------------------------------
+# Internal planning document (not part of the public repository)
+# ---------------------------------------------------------------------------
+ROADMAP.md
+
+# ---------------------------------------------------------------------------
+# Editors and operating system
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+.env
+*.key
