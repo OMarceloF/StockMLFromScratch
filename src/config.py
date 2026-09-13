@@ -71,8 +71,15 @@ HORIZON_SENSITIVITY = 5
 # Feature construction
 # ---------------------------------------------------------------------------
 
+#: Trailing windows, in trading days, over which cumulative return is measured:
+#: one day, one week, one month, one quarter, half a year. Roughly logarithmic
+#: spacing -- each window is ~3x the previous -- so five features span two
+#: orders of magnitude of horizon without any two describing the same thing.
+MOMENTUM_WINDOWS = (1, 5, 21, 63, 126)
+
 #: Longest lookback window used by any feature (the 126-day momentum and the
-#: rolling statistics built on it).
+#: rolling statistics built on it). `test_config.py` asserts this stays >= every
+#: window actually in use.
 MAX_FEATURE_WINDOW = 126
 
 #: Rows to drop at the start of each ticker, where rolling windows are not yet

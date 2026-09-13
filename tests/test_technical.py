@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from src import config
-from src.features.technical import log_returns, realized_volatility
+from src.features.technical import log_returns, momentum, realized_volatility
 from src.viz.plots import acf, mean_acf
 
 
@@ -66,6 +66,66 @@ class TestLogReturns:
         df["close"] = [100.0, 98.0]           # a 2.00 dividend paid on day two
         assert log_returns(df).iloc[1] == pytest.approx(0.0)
         assert log_returns(df, price_col="close").iloc[1] < -0.019
+
+
+class TestMomentum:
+    def test_equals_the_log_price_ratio_over_the_window(self):
+        """The definition check: an N-day momentum is log(P_t / P_{t-N}).
+
+        Stronger than comparing against a rolling sum, because it tests the
+        quantity we mean rather than the implementation we happened to write.
+        """
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        prices = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 200)))
+        df = frame({"A": list(prices)})
+        got = momentum(log_returns(df), df["ticker"], window=21)
+        for t in (50, 100, 199):
+            assert got.iloc[t] == pytest.approx(np.log(prices[t] / prices[t - 21]))
+
+    def test_window_of_one_is_the_daily_return(self):
+        df = frame({"A": [100.0, 110.0, 99.0, 120.0]})
+        r = log_returns(df)
+        pd.testing.assert_series_equal(momentum(r, df["ticker"], 1), r)
+
+    def test_emits_nothing_until_the_window_is_full(self):
+        """A leading NaN from log_returns must count against min_periods.
+
+        Otherwise a '5-day momentum' would appear one row early, built from
+        four days -- a differently-scaled feature hiding among the rest.
+        """
+        df = frame({"A": list(np.linspace(100, 140, 30))})
+        got = momentum(log_returns(df), df["ticker"], window=5)
+        assert got.iloc[:5].isna().all()
+        assert got.iloc[5:].notna().all()
+
+    def test_does_not_accumulate_across_the_ticker_boundary(self):
+        """B is flat, so every B momentum must be exactly zero.
+
+        A window bleeding over from A -- which rises 3% a day -- would leave
+        large positive values at the start of B.
+        """
+        df = frame({"A": list(100 * np.exp(np.cumsum(np.full(60, 0.03)))),
+                    "B": [50.0] * 60})
+        got = momentum(log_returns(df), df["ticker"], window=21)
+        b = got[df["ticker"] == "B"].dropna()
+        assert len(b) > 0
+        assert (b == 0).all()
+
+    def test_windows_nest_additively(self):
+        """Log-space additivity, restated: a long window is the sum of the
+        short windows that tile it. The property 2.1 was chosen for."""
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        prices = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 100)))
+        df = frame({"A": list(prices)})
+        r = log_returns(df)
+        long_window = momentum(r, df["ticker"], 20)
+        halves = momentum(r, df["ticker"], 10) + momentum(r, df["ticker"], 10).shift(10)
+        assert long_window.iloc[30] == pytest.approx(halves.iloc[30])
+
+    def test_index_is_preserved(self):
+        df = frame({"A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]})
+        r = log_returns(df)
+        assert momentum(r, df["ticker"], 2).index.equals(df.index)
 
 
 class TestRealizedVolatility:

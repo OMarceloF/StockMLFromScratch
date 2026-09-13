@@ -61,6 +61,16 @@ class TestFeasibility:
     def test_warmup_covers_the_longest_feature_window(self):
         assert config.WARMUP >= config.MAX_FEATURE_WINDOW
 
+    def test_max_feature_window_covers_every_momentum_window(self):
+        """Adding a 252-day momentum without raising MAX_FEATURE_WINDOW would
+        leave under-warmed rows in the matrix and nothing would complain."""
+        assert config.MAX_FEATURE_WINDOW >= max(config.MOMENTUM_WINDOWS)
+
+    def test_momentum_windows_are_sorted_and_distinct(self):
+        windows = config.MOMENTUM_WINDOWS
+        assert list(windows) == sorted(set(windows))
+        assert min(windows) >= 1
+
 
 class TestWalkForward:
     def test_training_data_exists_before_the_first_test_fold(self):
