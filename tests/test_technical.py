@@ -12,7 +12,14 @@ import pandas as pd
 import pytest
 
 from src import config
-from src.features.technical import log_returns, momentum, realized_volatility
+from src.features.technical import (
+    downside_volatility,
+    log_returns,
+    momentum,
+    realized_volatility,
+    safe_log,
+    volatility_ratio,
+)
 from src.viz.plots import acf, mean_acf
 
 
@@ -171,6 +178,142 @@ class TestRealizedVolatility:
         df = frame({"A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]})
         r = log_returns(df)
         assert realized_volatility(r, df["ticker"], window=2).index.equals(df.index)
+
+
+class TestSafeLog:
+    def test_matches_numpy_log_on_positive_values(self):
+        s = pd.Series([0.5, 1.0, 2.0, 100.0])
+        assert safe_log(s).to_numpy() == pytest.approx(np.log(s.to_numpy()))
+
+    def test_zero_becomes_nan_not_negative_infinity(self):
+        """The distinction the whole function exists for.
+
+        -inf survives arithmetic into the design matrix and surfaces as an
+        unhelpful LinAlgError; NaN is dropped by the pipeline.
+        """
+        got = safe_log(pd.Series([0.0, 1.0]))
+        assert np.isnan(got.iloc[0])
+        assert not np.isinf(got.iloc[0])
+
+    def test_negative_becomes_nan(self):
+        assert np.isnan(safe_log(pd.Series([-1.0])).iloc[0])
+
+    def test_nan_stays_nan(self):
+        assert np.isnan(safe_log(pd.Series([np.nan])).iloc[0])
+
+    def test_index_is_preserved(self):
+        s = pd.Series([1.0, 2.0], index=[7, 9])
+        assert safe_log(s).index.equals(s.index)
+
+
+class TestDownsideVolatility:
+    def test_is_zero_when_nothing_falls(self):
+        df = frame({"A": list(np.linspace(100, 160, 40))})
+        got = downside_volatility(log_returns(df), df["ticker"], window=10).dropna()
+        assert len(got) > 0
+        assert (got == 0).all()
+
+    def test_matches_the_semi_deviation_definition(self):
+        """sqrt(mean(min(r, 0)^2)) -- gains enter as zeros, not as omissions."""
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        prices = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 60)))
+        df = frame({"A": list(prices)})
+        r = log_returns(df)
+        got = downside_volatility(r, df["ticker"], window=10, annualize=False)
+        window = r.iloc[21:31].to_numpy()
+        expected = np.sqrt(np.mean(np.minimum(window, 0) ** 2))
+        assert got.iloc[30] == pytest.approx(expected)
+
+    def test_gains_are_counted_as_zeros_rather_than_dropped(self):
+        """Nine flat days and one -10% day: the denominator must be 10, not 1.
+
+        Taking the standard deviation of the losing subset instead would give a
+        single observation and a volatility of zero -- the opposite answer.
+        """
+        prices = [100.0] * 10 + [90.0]
+        df = frame({"A": prices})
+        r = log_returns(df)
+        got = downside_volatility(r, df["ticker"], window=10, annualize=False)
+        expected = np.sqrt((np.log(0.9) ** 2) / 10)
+        assert got.iloc[10] == pytest.approx(expected)
+
+    def test_emits_nothing_until_the_window_is_full(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        df = frame({"A": list(100 * np.exp(np.cumsum(rng.normal(0, 0.02, 30))))})
+        got = downside_volatility(log_returns(df), df["ticker"], window=10)
+        assert got.iloc[:10].isna().all()
+        assert got.iloc[10:].notna().all()
+
+    def test_does_not_cross_the_ticker_boundary(self):
+        df = frame({"A": list(100 * np.exp(np.cumsum(np.full(40, -0.05)))),
+                    "B": [50.0] * 40})
+        got = downside_volatility(log_returns(df), df["ticker"], window=5)
+        b = got[df["ticker"] == "B"].dropna()
+        assert len(b) > 0
+        assert (b == 0).all()
+
+    def test_annualisation_is_sqrt_252(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        df = frame({"A": list(100 * np.exp(np.cumsum(rng.normal(0, 0.02, 60))))})
+        r = log_returns(df)
+        raw = downside_volatility(r, df["ticker"], 20, annualize=False)
+        ann = downside_volatility(r, df["ticker"], 20, annualize=True)
+        ratio = (ann / raw).dropna()
+        assert ratio.iloc[0] == pytest.approx(np.sqrt(config.TRADING_DAYS_PER_YEAR))
+
+
+class TestVolatilityRatio:
+    def test_is_the_difference_of_logs(self):
+        short = pd.Series([0.2, 0.4, 0.1])
+        long = pd.Series([0.2, 0.2, 0.2])
+        got = volatility_ratio(short, long)
+        assert got.to_numpy() == pytest.approx(np.log(short / long))
+
+    def test_is_zero_when_the_regimes_agree(self):
+        s = pd.Series([0.3, 0.3])
+        assert volatility_ratio(s, s).to_numpy() == pytest.approx([0.0, 0.0])
+
+    def test_doubling_and_halving_are_symmetric(self):
+        """The reason for the log form: +0.69 and -0.69 rather than 2.0 and 0.5."""
+        base = pd.Series([0.2])
+        up = volatility_ratio(base * 2, base).iloc[0]
+        down = volatility_ratio(base / 2, base).iloc[0]
+        assert up == pytest.approx(-down)
+        assert up == pytest.approx(np.log(2))
+
+    def test_is_scale_free(self):
+        """A utility and a semiconductor must read the same at the same regime."""
+        short, long = pd.Series([0.10]), pd.Series([0.05])
+        assert volatility_ratio(short, long).iloc[0] == pytest.approx(
+            volatility_ratio(short * 7, long * 7).iloc[0]
+        )
+
+    def test_zero_volatility_yields_nan_not_infinity(self):
+        got = volatility_ratio(pd.Series([0.0]), pd.Series([0.2]))
+        assert np.isnan(got.iloc[0]) and not np.isinf(got.iloc[0])
+
+    def test_is_exactly_collinear_with_its_two_legs(self):
+        """Pins down why this feature is excluded from the model matrix.
+
+        volatility_ratio(a, b) == safe_log(a) - safe_log(b) exactly, so a design
+        matrix holding all three has a rank one short of its column count. The
+        normal equation does not raise -- floating point leaves a non-zero
+        determinant -- it just returns coefficients that are not unique. On the
+        real dataset the condition number goes from 8.5 to 9.0e14.
+        """
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        short = pd.Series(np.exp(rng.normal(-2, 0.5, 500)))
+        long = pd.Series(np.exp(rng.normal(-2, 0.5, 500)))
+        ratio = volatility_ratio(short, long)
+
+        assert ratio.to_numpy() == pytest.approx(
+            (safe_log(short) - safe_log(long)).to_numpy()
+        )
+
+        design = np.column_stack([
+            np.ones(len(short)), safe_log(short), safe_log(long), ratio
+        ])
+        assert np.linalg.matrix_rank(design) == design.shape[1] - 1
 
 
 class TestAcf:

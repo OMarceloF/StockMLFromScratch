@@ -71,6 +71,15 @@ HORIZON_SENSITIVITY = 5
 # Feature construction
 # ---------------------------------------------------------------------------
 
+#: Trailing windows, in trading days, over which realised volatility is
+#: measured: one week, one month, one quarter. The short and long ends are
+#: also divided against each other to form a regime indicator.
+VOLATILITY_WINDOWS = (5, 21, 63)
+
+#: The pair whose ratio measures "is the recent past more turbulent than the
+#: recent baseline?". Both must appear in VOLATILITY_WINDOWS.
+VOL_RATIO_PAIR = (5, 21)
+
 #: Trailing windows, in trading days, over which cumulative return is measured:
 #: one day, one week, one month, one quarter, half a year. Roughly logarithmic
 #: spacing -- each window is ~3x the previous -- so five features span two
