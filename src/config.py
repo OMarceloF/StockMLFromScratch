@@ -71,6 +71,10 @@ HORIZON_SENSITIVITY = 5
 # Feature construction
 # ---------------------------------------------------------------------------
 
+#: Trailing window for the volume z-score: one quarter of context against
+#: which today's turnover is judged unusual or ordinary.
+VOLUME_ZSCORE_WINDOW = 63
+
 #: Trailing windows, in trading days, over which realised volatility is
 #: measured: one week, one month, one quarter. The short and long ends are
 #: also divided against each other to form a regime indicator.

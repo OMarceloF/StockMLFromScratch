@@ -19,6 +19,7 @@ from src.features.technical import (
     realized_volatility,
     safe_log,
     volatility_ratio,
+    volume_zscore,
 )
 from src.viz.plots import acf, mean_acf
 
@@ -260,6 +261,90 @@ class TestDownsideVolatility:
         ann = downside_volatility(r, df["ticker"], 20, annualize=True)
         ratio = (ann / raw).dropna()
         assert ratio.iloc[0] == pytest.approx(np.sqrt(config.TRADING_DAYS_PER_YEAR))
+
+
+class TestVolumeZscore:
+    @staticmethod
+    def volume_frame(volumes: dict[str, list[float]]) -> pd.DataFrame:
+        rows = []
+        for ticker, vols in volumes.items():
+            dates = pd.bdate_range("2020-01-01", periods=len(vols))
+            rows += [{"date": d, "ticker": ticker, "volume": v}
+                     for d, v in zip(dates, vols)]
+        df = pd.DataFrame(rows)
+        df["ticker"] = df["ticker"].astype("category")
+        return df
+
+    def test_matches_the_definition_on_log_volume(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        vols = np.exp(rng.normal(15, 0.5, 100))
+        df = self.volume_frame({"A": list(vols)})
+        got = volume_zscore(df["volume"], df["ticker"], window=20)
+        window = np.log(vols[31:51])
+        expected = (np.log(vols[50]) - window.mean()) / window.std(ddof=1)
+        assert got.iloc[50] == pytest.approx(expected)
+
+    def test_is_scale_free_across_tickers(self):
+        """A 3,202x difference in size must not shift the feature at all.
+
+        This is the property that lets one pooled model span MTD and NVDA.
+        """
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        shape = np.exp(rng.normal(0, 0.4, 120))
+        df = self.volume_frame({"SMALL": list(150_000 * shape),
+                                "LARGE": list(480_000_000 * shape)})
+        got = volume_zscore(df["volume"], df["ticker"], window=63)
+        small = got[df["ticker"] == "SMALL"].dropna().to_numpy()
+        large = got[df["ticker"] == "LARGE"].dropna().to_numpy()
+        assert small == pytest.approx(large)
+
+    def test_is_centred_on_its_own_history(self):
+        """Constant-ratio growth leaves z near zero; only surprises move it."""
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        df = self.volume_frame({"A": list(np.exp(rng.normal(15, 0.3, 400)))})
+        got = volume_zscore(df["volume"], df["ticker"], window=63).dropna()
+        assert abs(got.mean()) < 0.5
+
+    def test_a_volume_spike_registers_as_a_large_positive_z(self):
+        vols = [1_000_000.0] * 63 + [1_100_000.0]
+        df = self.volume_frame({"A": vols})
+        quiet = volume_zscore(df["volume"], df["ticker"], window=63).iloc[63]
+        vols_spike = [1_000_000.0] * 63 + [20_000_000.0]
+        df2 = self.volume_frame({"A": vols_spike})
+        spike = volume_zscore(df2["volume"], df2["ticker"], window=63).iloc[63]
+        assert spike > quiet > 0
+
+    def test_constant_volume_yields_nan_not_infinity(self):
+        """Zero denominator: NaN is droppable, +/-inf poisons the fit."""
+        df = self.volume_frame({"A": [1_000_000.0] * 64})
+        got = volume_zscore(df["volume"], df["ticker"], window=63)
+        assert np.isnan(got.iloc[63])
+        assert not np.isinf(got).any()
+
+    def test_zero_volume_yields_nan(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        vols = list(np.exp(rng.normal(15, 0.4, 70)))
+        vols[65] = 0.0
+        df = self.volume_frame({"A": vols})
+        assert np.isnan(volume_zscore(df["volume"], df["ticker"], window=20).iloc[65])
+
+    def test_does_not_cross_the_ticker_boundary(self):
+        """B's window must never see A's much larger volumes."""
+        df = self.volume_frame({"A": [500_000_000.0] * 80, "B": [100_000.0] * 80})
+        got = volume_zscore(df["volume"], df["ticker"], window=63)
+        b = got[df["ticker"] == "B"]
+        assert b.isna().all()  # B is constant -> NaN, never a huge negative z
+
+    def test_emits_nothing_until_the_window_is_full(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        df = self.volume_frame({"A": list(np.exp(rng.normal(15, 0.4, 40)))})
+        got = volume_zscore(df["volume"], df["ticker"], window=20)
+        assert got.iloc[:19].isna().all()
+        assert got.iloc[19:].notna().all()
+
+    def test_index_is_preserved(self):
+        df = self.volume_frame({"A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]})
+        assert volume_zscore(df["volume"], df["ticker"], 2).index.equals(df.index)
 
 
 class TestVolatilityRatio:

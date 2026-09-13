@@ -232,6 +232,52 @@ def downside_volatility(
     return vol
 
 
+def volume_zscore(
+    volume: pd.Series,
+    groups: pd.Series,
+    window: int,
+    *,
+    min_periods: int | None = None,
+) -> pd.Series:
+    """How unusual today's turnover is, judged against this ticker's own recent past.
+
+    Raw volume cannot enter a pooled model. On this dataset median daily volume
+    runs from 149,600 shares (MTD) to 479 million (NVDA) -- a factor of 3,202 --
+    so a coefficient fitted on one is meaningless for the other. Its skewness is
+    21.1; in logs it is 0.09.
+
+    The z-score is taken on **log** volume, not raw. Both forms predict the
+    target about equally (correlation 0.058 against 0.056), but the raw version
+    leaves 8,097 rows beyond five standard deviations against 461 for the log
+    version -- a seventeen-fold difference in extreme values feeding a least
+    squares fit that squares them.
+
+    Rolling mean and standard deviation are computed per ticker, so the feature
+    asks "is this heavy for *this* stock", which is scale-free by construction
+    and comparable across the panel.
+
+    Returns
+    -------
+    Series
+        Aligned to `volume.index`. NaN where the window is incomplete, where
+        volume is zero, or where turnover was constant across the whole window
+        (a zero denominator).
+    """
+    if min_periods is None:
+        min_periods = window
+
+    log_volume = safe_log(volume.astype(float))
+    rolling = log_volume.groupby(groups, observed=True).rolling(
+        window, min_periods=min_periods
+    )
+    mean = rolling.mean().droplevel(0).reindex(log_volume.index)
+    std = rolling.std().droplevel(0).reindex(log_volume.index)
+
+    # A constant-volume window gives std 0; dividing would yield +/-inf, which
+    # survives into the design matrix. NaN is dropped instead.
+    return (log_volume - mean) / std.where(std > 0)
+
+
 def volatility_ratio(short_vol: pd.Series, long_vol: pd.Series) -> pd.Series:
     """Log ratio of a short-window volatility to a long-window one.
 
