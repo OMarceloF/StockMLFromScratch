@@ -75,6 +75,20 @@ HORIZON_SENSITIVITY = 5
 #: which today's turnover is judged unusual or ordinary.
 VOLUME_ZSCORE_WINDOW = 63
 
+#: Moving averages the current price is measured against.
+SMA_WINDOWS = (21, 63)
+
+#: Window for the position-in-range feature (where the close sits between the
+#: window's low and high).
+RANGE_WINDOW = 63
+
+#: Window for the Parkinson high-low volatility estimator.
+PARKINSON_WINDOW = 21
+
+#: Window for the Relative Strength Index. 14 is the conventional setting and
+#: is kept so the feature means what a reader expects it to mean.
+RSI_WINDOW = 14
+
 #: Trailing windows, in trading days, over which realised volatility is
 #: measured: one week, one month, one quarter. The short and long ends are
 #: also divided against each other to form a regime indicator.

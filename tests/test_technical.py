@@ -16,7 +16,11 @@ from src.features.technical import (
     downside_volatility,
     log_returns,
     momentum,
+    parkinson_volatility,
+    position_in_range,
+    price_vs_moving_average,
     realized_volatility,
+    rsi,
     safe_log,
     volatility_ratio,
     volume_zscore,
@@ -261,6 +265,201 @@ class TestDownsideVolatility:
         ann = downside_volatility(r, df["ticker"], 20, annualize=True)
         ratio = (ann / raw).dropna()
         assert ratio.iloc[0] == pytest.approx(np.sqrt(config.TRADING_DAYS_PER_YEAR))
+
+
+def ohlc_frame(bars: dict[str, list[tuple[float, float, float]]]) -> pd.DataFrame:
+    """Frame from (high, low, close) triples per ticker."""
+    rows = []
+    for ticker, series in bars.items():
+        dates = pd.bdate_range("2020-01-01", periods=len(series))
+        rows += [{"date": d, "ticker": ticker, "high": h, "low": lo,
+                  "close": c, "adj_close": c}
+                 for d, (h, lo, c) in zip(dates, series)]
+    df = pd.DataFrame(rows)
+    df["ticker"] = df["ticker"].astype("category")
+    return df
+
+
+class TestPriceVsMovingAverage:
+    def test_matches_the_definition(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        prices = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 100)))
+        df = frame({"A": list(prices)})
+        got = price_vs_moving_average(df["adj_close"], df["ticker"], window=21)
+        expected = np.log(prices[60] / prices[40:61].mean())
+        assert got.iloc[60] == pytest.approx(expected)
+
+    def test_is_zero_on_a_flat_series(self):
+        df = frame({"A": [50.0] * 40})
+        got = price_vs_moving_average(df["adj_close"], df["ticker"], window=21).dropna()
+        assert got.to_numpy() == pytest.approx(0.0)
+
+    def test_is_scale_free(self):
+        """The same trajectory at $2 and at $2,000 must read identically."""
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        shape = np.exp(np.cumsum(rng.normal(0, 0.02, 80)))
+        df = frame({"CHEAP": list(2 * shape), "DEAR": list(2000 * shape)})
+        got = price_vs_moving_average(df["adj_close"], df["ticker"], window=21)
+        cheap = got[df["ticker"] == "CHEAP"].dropna().to_numpy()
+        dear = got[df["ticker"] == "DEAR"].dropna().to_numpy()
+        assert cheap == pytest.approx(dear)
+
+    def test_differs_from_plain_momentum(self):
+        """Justifies the feature's existence: it is not a renamed ret_21.
+
+        An outlier 21 days ago swings momentum but barely moves an average of
+        21 values.
+        """
+        prices = [100.0] * 21 + [200.0] + [100.0] * 21
+        df = frame({"A": prices})
+        sma_based = price_vs_moving_average(df["adj_close"], df["ticker"], 21)
+        point_based = momentum(log_returns(df), df["ticker"], 21)
+        assert not np.isclose(sma_based.iloc[-1], point_based.iloc[-1])
+
+    def test_emits_nothing_until_the_window_is_full(self):
+        df = frame({"A": list(np.linspace(100, 140, 30))})
+        got = price_vs_moving_average(df["adj_close"], df["ticker"], window=21)
+        assert got.iloc[:20].isna().all()
+        assert got.iloc[20:].notna().all()
+
+    def test_does_not_cross_the_ticker_boundary(self):
+        df = frame({"A": [500.0] * 30, "B": [10.0] * 30})
+        got = price_vs_moving_average(df["adj_close"], df["ticker"], window=21)
+        b = got[df["ticker"] == "B"].dropna()
+        assert len(b) > 0
+        assert b.to_numpy() == pytest.approx(0.0)
+
+
+class TestPositionInRange:
+    def test_is_one_at_the_top_of_the_range(self):
+        bars = [(10.0, 8.0, 9.0)] * 20 + [(12.0, 11.0, 12.0)]
+        df = ohlc_frame({"A": bars})
+        got = position_in_range(df["close"], df["high"], df["low"], df["ticker"], 21)
+        assert got.iloc[20] == pytest.approx(1.0)
+
+    def test_is_zero_at_the_bottom_of_the_range(self):
+        bars = [(10.0, 8.0, 9.0)] * 20 + [(7.5, 6.0, 6.0)]
+        df = ohlc_frame({"A": bars})
+        got = position_in_range(df["close"], df["high"], df["low"], df["ticker"], 21)
+        assert got.iloc[20] == pytest.approx(0.0)
+
+    def test_stays_within_zero_and_one(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        close = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 300)))
+        bars = [(c * 1.01, c * 0.99, c) for c in close]
+        df = ohlc_frame({"A": bars})
+        got = position_in_range(df["close"], df["high"], df["low"], df["ticker"], 63).dropna()
+        assert got.min() >= 0.0 and got.max() <= 1.0
+
+    def test_flat_window_yields_nan_not_infinity(self):
+        df = ohlc_frame({"A": [(10.0, 10.0, 10.0)] * 25})
+        got = position_in_range(df["close"], df["high"], df["low"], df["ticker"], 21)
+        assert np.isnan(got.iloc[21])
+        assert not np.isinf(got).any()
+
+    def test_does_not_cross_the_ticker_boundary(self):
+        df = ohlc_frame({"A": [(100.0, 90.0, 95.0)] * 30,
+                         "B": [(10.0, 9.0, 9.5)] * 30})
+        got = position_in_range(df["close"], df["high"], df["low"], df["ticker"], 21).dropna()
+        assert got.min() >= 0.0 and got.max() <= 1.0
+
+
+class TestParkinsonVolatility:
+    def test_matches_the_definition(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        close = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 60)))
+        highs = close * np.exp(np.abs(rng.normal(0, 0.01, 60)))
+        lows = close * np.exp(-np.abs(rng.normal(0, 0.01, 60)))
+        df = ohlc_frame({"A": list(zip(highs, lows, close))})
+        got = parkinson_volatility(df["high"], df["low"], df["ticker"], 21, annualize=False)
+        window = np.log(highs[20:41] / lows[20:41]) ** 2
+        assert got.iloc[40] == pytest.approx(np.sqrt(window.mean() / (4 * np.log(2))))
+
+    def test_is_zero_when_there_is_no_intraday_range(self):
+        df = ohlc_frame({"A": [(10.0, 10.0, 10.0)] * 30})
+        got = parkinson_volatility(df["high"], df["low"], df["ticker"], 21).dropna()
+        assert (got == 0).all()
+
+    def test_sees_movement_that_close_to_close_volatility_misses(self):
+        """The reason this feature earns its place.
+
+        Every day swings 6% intraday and closes exactly flat. Close-to-close
+        volatility reports zero; Parkinson reports the real turbulence.
+        """
+        df = ohlc_frame({"A": [(103.0, 97.0, 100.0)] * 30})
+        park = parkinson_volatility(df["high"], df["low"], df["ticker"], 21).dropna()
+        close_to_close = realized_volatility(
+            log_returns(df), df["ticker"], 21
+        ).dropna()
+        assert (close_to_close == 0).all()
+        assert (park > 0.2).all()
+
+    def test_is_scale_free(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        base = [(1.03, 0.97, 1.0)] * 30
+        cheap = ohlc_frame({"A": [(h * 2, lo * 2, c * 2) for h, lo, c in base]})
+        dear = ohlc_frame({"A": [(h * 2000, lo * 2000, c * 2000) for h, lo, c in base]})
+        a = parkinson_volatility(cheap["high"], cheap["low"], cheap["ticker"], 21).dropna()
+        b = parkinson_volatility(dear["high"], dear["low"], dear["ticker"], 21).dropna()
+        assert a.to_numpy() == pytest.approx(b.to_numpy())
+
+    def test_annualisation_is_sqrt_252(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        close = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 60)))
+        df = ohlc_frame({"A": [(c * 1.02, c * 0.98, c) for c in close]})
+        raw = parkinson_volatility(df["high"], df["low"], df["ticker"], 21, annualize=False)
+        ann = parkinson_volatility(df["high"], df["low"], df["ticker"], 21, annualize=True)
+        assert (ann / raw).dropna().iloc[0] == pytest.approx(
+            np.sqrt(config.TRADING_DAYS_PER_YEAR)
+        )
+
+    def test_does_not_cross_the_ticker_boundary(self):
+        df = ohlc_frame({"A": [(120.0, 80.0, 100.0)] * 30,
+                         "B": [(10.0, 10.0, 10.0)] * 30})
+        got = parkinson_volatility(df["high"], df["low"], df["ticker"], 21)
+        b = got[df["ticker"] == "B"].dropna()
+        assert len(b) > 0
+        assert (b == 0).all()
+
+
+class TestRsi:
+    def test_is_one_hundred_when_every_day_gains(self):
+        df = frame({"A": list(100 * 1.01 ** np.arange(30))})
+        got = rsi(log_returns(df), df["ticker"], 14).dropna()
+        assert got.to_numpy() == pytest.approx(100.0)
+
+    def test_is_zero_when_every_day_loses(self):
+        df = frame({"A": list(100 * 0.99 ** np.arange(30))})
+        got = rsi(log_returns(df), df["ticker"], 14).dropna()
+        assert got.to_numpy() == pytest.approx(0.0)
+
+    def test_is_fifty_when_gains_and_losses_balance(self):
+        prices = [100.0]
+        for i in range(28):
+            prices.append(prices[-1] * (1.01 if i % 2 == 0 else 1 / 1.01))
+        df = frame({"A": prices})
+        got = rsi(log_returns(df), df["ticker"], 14).dropna()
+        assert got.to_numpy() == pytest.approx(50.0)
+
+    def test_stays_within_zero_and_one_hundred(self):
+        rng = np.random.default_rng(config.RANDOM_SEED)
+        df = frame({"A": list(100 * np.exp(np.cumsum(rng.normal(0, 0.03, 500))))})
+        got = rsi(log_returns(df), df["ticker"], 14).dropna()
+        assert got.min() >= 0.0 and got.max() <= 100.0
+
+    def test_a_motionless_window_yields_nan_not_a_division_error(self):
+        df = frame({"A": [10.0] * 20})
+        got = rsi(log_returns(df), df["ticker"], 14)
+        assert np.isnan(got.iloc[15])
+        assert not np.isinf(got).any()
+
+    def test_does_not_cross_the_ticker_boundary(self):
+        df = frame({"A": list(100 * 1.02 ** np.arange(30)),
+                    "B": list(100 * 0.98 ** np.arange(30))})
+        got = rsi(log_returns(df), df["ticker"], 14)
+        b = got[df["ticker"] == "B"].dropna()
+        assert len(b) > 0
+        assert b.to_numpy() == pytest.approx(0.0)
 
 
 class TestVolumeZscore:

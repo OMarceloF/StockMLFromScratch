@@ -232,6 +232,157 @@ def downside_volatility(
     return vol
 
 
+def _rolling(series: pd.Series, groups: pd.Series, window: int, min_periods: int | None):
+    """Per-ticker rolling window, re-aligned to the original index.
+
+    `groupby(...).rolling(...)` returns a MultiIndex of (group, original row).
+    Dropping the group level and reindexing restores alignment, which every
+    windowed feature in this module needs.
+    """
+    return series.groupby(groups, observed=True).rolling(
+        window, min_periods=window if min_periods is None else min_periods
+    )
+
+
+def price_vs_moving_average(
+    price: pd.Series,
+    groups: pd.Series,
+    window: int,
+    *,
+    min_periods: int | None = None,
+) -> pd.Series:
+    """Log distance between the current price and its own moving average.
+
+    ``log(P_t / SMA_window)``: positive when the price sits above its recent
+    average, negative below. Scale-free, so a reading of +0.05 means "5% above
+    trend" for any ticker at any price level.
+
+    Related to momentum but not the same quantity. `momentum` compares the
+    price to a single point `window` days ago; this compares it to the average
+    of every day in between, which is far less sensitive to whether that one
+    reference day happened to be an outlier.
+    """
+    sma = (
+        _rolling(price, groups, window, min_periods)
+        .mean()
+        .droplevel(0)
+        .reindex(price.index)
+    )
+    return safe_log(price) - safe_log(sma)
+
+
+def position_in_range(
+    close: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    groups: pd.Series,
+    window: int,
+    *,
+    min_periods: int | None = None,
+) -> pd.Series:
+    """Where the close sits between the window's low and high, on a 0-1 scale.
+
+    ``(C - min(low)) / (max(high) - min(low))``. Zero means the close is at the
+    bottom of its recent range, one at the top.
+
+    Bounded and non-linear, which is the point of including it alongside the
+    momentum features: those are unbounded and linear, so a linear model sees
+    "twice as far up" as twice the effect. This saturates instead, which is a
+    different shape to offer the same model.
+
+    Returns NaN when the window is flat (high equals low throughout), which
+    would otherwise divide by zero.
+    """
+    window_low = (
+        _rolling(low, groups, window, min_periods).min().droplevel(0).reindex(low.index)
+    )
+    window_high = (
+        _rolling(high, groups, window, min_periods).max().droplevel(0).reindex(high.index)
+    )
+    span = window_high - window_low
+    return (close - window_low) / span.where(span > 0)
+
+
+def parkinson_volatility(
+    high: pd.Series,
+    low: pd.Series,
+    groups: pd.Series,
+    window: int,
+    *,
+    annualize: bool = True,
+    min_periods: int | None = None,
+) -> pd.Series:
+    """Volatility estimated from the daily high-low range.
+
+    ``sqrt( mean(log(H/L)^2) / (4 log 2) )``, the Parkinson (1980) estimator.
+
+    `realized_volatility` only sees closing prices, so a day that swings 6% and
+    closes flat registers as a quiet day. This sees that swing. For that reason
+    the estimator is, in theory, several times more efficient than the
+    close-to-close standard deviation at the same window length -- it uses two
+    extra observations per day that the other one throws away.
+
+    Whether that theoretical efficiency survives contact with this dataset is
+    an empirical question, and one worth asking before the feature is kept.
+
+    The ``4 log 2`` constant is what makes the result comparable to a standard
+    deviation: it is the expected value of ``log(H/L)^2`` for a driftless random
+    walk of unit variance.
+    """
+    log_hl_squared = (safe_log(high) - safe_log(low)) ** 2
+
+    mean_squared = (
+        _rolling(log_hl_squared, groups, window, min_periods)
+        .mean()
+        .droplevel(0)
+        .reindex(high.index)
+    )
+
+    vol = np.sqrt(mean_squared / (4 * np.log(2)))
+    if annualize:
+        vol = vol * np.sqrt(config.TRADING_DAYS_PER_YEAR)
+    return vol
+
+
+def rsi(
+    returns: pd.Series,
+    groups: pd.Series,
+    window: int,
+    *,
+    min_periods: int | None = None,
+) -> pd.Series:
+    """Relative Strength Index, on a 0-100 scale.
+
+    Computed as ``100 * G / (G + L)``, where G and L are the mean gain and mean
+    loss over the window. That form is algebraically identical to the textbook
+    ``100 - 100 / (1 + G/L)`` but never divides by a loss of zero -- a window
+    with no down days gives 100 rather than an infinity.
+
+    Uses a simple rolling mean rather than Wilder's exponential smoothing. The
+    simple version has an exact, testable definition and a window that ends
+    cleanly; Wilder's carries an infinite tail, which makes "this feature uses
+    the last 14 days" untrue.
+
+    Like `position_in_range`, this is included as a **bounded** view of
+    momentum. It saturates near 0 and 100, so a linear model gets a shape it
+    cannot build from the unbounded momentum features on their own.
+
+    Returns NaN for a window with no movement at all (G + L == 0).
+    """
+    gains = returns.clip(lower=0)
+    losses = (-returns).clip(lower=0)
+
+    mean_gain = (
+        _rolling(gains, groups, window, min_periods).mean().droplevel(0).reindex(returns.index)
+    )
+    mean_loss = (
+        _rolling(losses, groups, window, min_periods).mean().droplevel(0).reindex(returns.index)
+    )
+
+    total = mean_gain + mean_loss
+    return 100 * mean_gain / total.where(total > 0)
+
+
 def volume_zscore(
     volume: pd.Series,
     groups: pd.Series,
