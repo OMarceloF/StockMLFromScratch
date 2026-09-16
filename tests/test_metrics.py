@@ -108,14 +108,16 @@ class TestTheReferenceChoice:
             r_squared(y, p, reference=0.0)
         )
 
-    def test_self_reference_is_the_most_generous_possible(self):
-        """The sample mean minimises SS_tot, so `self` maximises SS_tot's
-        denominator only when the fixed reference is further from the data.
+    def test_self_reference_is_the_strictest_possible(self):
+        """`reference="self"` always gives the *smallest* R^2 of any reference.
 
-        Concretely: any reference other than the sample mean inflates SS_tot,
-        which inflates R^2. That is why the out-of-sample convention usually
-        reports the *higher* number, and why quoting whichever looks better is
-        not a neutral act.
+        The sample mean is the value that minimises SS_tot, and R^2 is
+        `1 - SS_res/SS_tot`, so a smaller denominator means a smaller score.
+        Any reference fixed elsewhere inflates SS_tot and therefore R^2.
+
+        That is precisely why the out-of-sample convention reports the higher
+        number here (0.5512 against 0.4204), and why picking whichever looks
+        better after the fact is not a neutral act.
         """
         y = np.array([2.0, 4.0, 6.0, 8.0])
         p = np.array([3.0, 4.0, 5.0, 9.0])

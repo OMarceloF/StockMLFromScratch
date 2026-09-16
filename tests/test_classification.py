@@ -174,7 +174,7 @@ class TestRocCurve:
         """Otherwise the curve would depend on the order rows arrived in."""
         y = [0, 1, 0, 1]
         s = [0.5, 0.5, 0.5, 0.5]
-        fpr, _, thresholds = roc_curve(y, s)
+        fpr, _, _ = roc_curve(y, s)
         assert len(fpr) == 2  # the origin plus a single cut
 
     def test_a_perfect_ranking_reaches_the_corner(self):
